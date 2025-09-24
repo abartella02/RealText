@@ -24,6 +24,7 @@ from typing import Tuple, Optional
 from pathlib import Path
 import re
 from urllib import request
+import json
 
 
 class Word2Vec:
@@ -34,6 +35,7 @@ class Word2Vec:
 
     def __init__(self, dataset: pd.DataFrame) -> None:
         self.dataset = dataset
+        self.max_len_sentence = self.__get_existing_max_len_sentence()
 
         model_path = Path(".word2vec/GoogleNews-vectors-negative300-SLIM.bin.gz")
 
@@ -61,6 +63,20 @@ class Word2Vec:
             trainable=False,
         )
 
+    def __get_existing_max_len_sentence(self) -> Optional[int]:
+        if not Path('metadata.json').exists():
+            return
+
+        with open("metadata.json", "r") as f:
+            d = json.load(f)
+            if d.get('max_len_sentence', None) is None:
+                return
+            return d['max_len_sentence']
+
+    def __write_max_len_sentence(self) -> None:
+        with open("metadata.json", 'w') as f:
+            json.dump({'max_len_sentence':self.max_len_sentence}, f)
+
     def __words_to_indices(self, sentence: str) -> list[int]:
         """Convert a sentence to a list of indices, readable by a NN's word2vec layer"""
         words = re.findall(r"\w+", sentence)  # split the sentence into a list of words
@@ -73,11 +89,19 @@ class Word2Vec:
         encoded_sentences = list(
             self.dataset["Text"].apply(self.__words_to_indices)
         )  # convert to indices
-        max_len_sentence = max(
-            len(sentence) for sentence in encoded_sentences
-        )  # find sample with most words
+
+
+        if self.max_len_sentence is None:
+            # should only run during training
+            self.max_len_sentence = max(
+                len(sentence) for sentence in encoded_sentences
+            )  # find sample with most words
+
+            self.__write_max_len_sentence()
+
+
         encoded_sentences = pad_sequences(
-            encoded_sentences, maxlen=max_len_sentence, padding="post"
+            encoded_sentences, maxlen=self.max_len_sentence, padding="post"
         )  # pad all other samples
 
         features = pd.DataFrame(encoded_sentences)  # create feature matrix
@@ -91,7 +115,7 @@ class SamplingStrategy:
         pass
 
     def data_cleanup(
-        self, dataset: pd.DataFrame, amount_per_class: int
+        self, dataset: pd.DataFrame, amount_per_class:int, shuffle: bool
     ) -> pd.DataFrame:
         # Drop rows with NaN in the 'text' column
         dataset = dataset.dropna(subset=["text"])
@@ -120,7 +144,8 @@ class SamplingStrategy:
             shortened_data = dataset
 
         # Shuffle and reset the index for the new df
-        shortened_data = shortened_data.sample(frac=1)
+        if shuffle:
+            shortened_data = shortened_data.sample(frac=1)
         shortened_data = shortened_data.reset_index(drop=True)
 
         return shortened_data
@@ -144,13 +169,14 @@ class SamplingStrategy:
         self,
         data: pd.DataFrame,
         samples_per_class: int,
+        shuffle: bool,
         to_csv: bool = False,
         output_csv_path: str = "data/preprocessed.csv",
     ) -> pd.DataFrame:
         """Preprocess using data cleanup and condense text"""
 
         # shorten the size of the dataset
-        train_shortened_data = self.data_cleanup(data, samples_per_class)
+        train_shortened_data = self.data_cleanup(data, samples_per_class, shuffle=shuffle)
 
         # get rid of whitespace and other stuff from the texts
         train_no_space_data = self.condense_text(train_shortened_data, "text")
@@ -241,7 +267,7 @@ class RNNTextClassifier:
                 predicted_labels.append(1)
             else:
                 predicted_labels.append(0)
-            predicted_confidence.append(value)
+            predicted_confidence.append(float(value))
 
         return predicted_labels, predicted_confidence
 
@@ -255,7 +281,7 @@ class RNNTextClassifier:
 
 
 def preprocess(
-    dataset: pd.DataFrame, samples_per_class: int
+    dataset: pd.DataFrame, samples_per_class: int = 0, shuffle: bool = True
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     class Dataset(pd.DataFrame):
         """Subclass of DataFrame to carry on the Word2Vec object as an attribute, for use later"""
@@ -271,9 +297,10 @@ def preprocess(
             return Dataset
 
     ss = SamplingStrategy()
-    dataset = ss.sample_and_clean(dataset, samples_per_class=samples_per_class)
+    dataset = ss.sample_and_clean(dataset, samples_per_class=samples_per_class, shuffle=shuffle)
 
     # convert to numerical representation
+    _max_len_exists = Path('data.json').exists()
     w2v = Word2Vec(dataset=dataset)
     features, labels = w2v.encode_text_dataset()
 
@@ -337,6 +364,9 @@ if __name__ == "__main__":
     train = pd.read_csv("data/final_train.csv")
 
     train_features, train_labels = preprocess(train, samples_per_class=1000)
+
+    with open('data.json', 'w') as f:
+        json.dump({"max_len_sentence":train_features.w2v.max_len_sentence},f)
 
     rnn = RNNTextClassifier(w2v_embedding_layer=train_features.w2v.embed_layer)
 
