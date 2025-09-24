@@ -230,7 +230,10 @@ class RNNTextClassifier:
         )
 
     def predict(self, test_text: pd.DataFrame) -> Tuple[list[int], list[float]]:
-        results = self.model.predict(test_text)
+
+        test_text = tf.convert_to_tensor(test_text.values)
+        results = self.model(test_text, training=False)
+        # results = self.model.predict(test_text, training=False)
         predicted_labels = []
         predicted_confidence = []
         for value in results:
