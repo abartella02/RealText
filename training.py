@@ -16,7 +16,9 @@ import tensorflow as tf
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 from tensorflow.keras.layers import Embedding
 from tensorflow.keras import Model
+from tensorflow.keras.callbacks import EarlyStopping
 from sklearn.metrics import confusion_matrix
+import spacy
 
 import os
 import shutil
@@ -152,6 +154,12 @@ class SamplingStrategy:
 
     def condense_text(self, data: pd.DataFrame, text_column_name: str) -> pd.DataFrame:
         """Function to convert each text sample into single paragraphs with no spacing, new lines, etc"""
+        nlp = spacy.load("en_core_web_sm")
+
+        def lemmatize(x):
+            nonlocal nlp
+            doc = nlp(x)
+            return ' '.join([token.lemma_ for token in doc])
 
         # Replace multiple line breaks with a space for each item in the column
         data[text_column_name] = data[text_column_name].str.replace(
@@ -163,6 +171,7 @@ class SamplingStrategy:
             data[text_column_name].str.replace(r"\s+", " ", regex=True).str.strip()
         )
 
+        data[text_column_name] = data[text_column_name].apply(lemmatize)
         return data
 
     def sample_and_clean(
@@ -251,8 +260,12 @@ class RNNTextClassifier:
         epoch: int,
         batch_size: int,
     ) -> None:
+
+        # KERAS built in in early stopping, will stop training once loss is the same for two consecutive epochs
+        callbacks = [EarlyStopping(monitor = "loss", patience = 2, restore_best_weights = False)]
+
         self.model.fit(
-            train_text, train_label, epochs=epoch, batch_size=batch_size, verbose=2
+            train_text, train_label, epochs=epoch, batch_size=batch_size, verbose=2, callbacks = callbacks
         )
 
     def predict(self, test_text: pd.DataFrame) -> Tuple[list[int], list[float]]:
@@ -322,6 +335,7 @@ def preprocess(
 
 def download_dataset() -> Path:
     """Download the dataset to ./data/ if the dataset has not already been downloaded"""
+    spacy.cli.download('en_core_web_sm')
     # path to dataset in kagglehub
     dataset = "jdragonxherrera/augmented-data-for-llm-detect-ai-generated-text"
 
