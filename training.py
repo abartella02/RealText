@@ -398,4 +398,4 @@ if __name__ == "__main__":
     print(f"elapsed = {(time.time()-start_time)//60} minutes")
 
     print("saving model...")
-    rnn.model.save("saved_model.h5")
+    rnn.model.save("saved_model.keras")

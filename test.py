@@ -10,8 +10,8 @@ from training import RNNTextClassifier, download_dataset
 
 if __name__ == "__main__":
     download_dataset()
-    test = pd.read_csv("data/my_test.csv")
-    test_features, test_labels = preprocess(test, shuffle=False)
+    test = pd.read_csv("data/final_test.csv")
+    test_features, test_labels = preprocess(test, samples_per_class=5, shuffle=False)
 
     model = load_model("saved_model.h5")
 
@@ -24,23 +24,27 @@ if __name__ == "__main__":
     cm = rnn.prediction_metrics(
         y_predicted=predicted_labels, y_actual=test_labels
     )
-    # tn, fp, fn, tp = cm.ravel()
+    tn, fp, fn, tp = cm
 
-    # accuracy = (tp + tn) / (tp + fp + fn + tn)
-    # sensitivity = tp / (tp + fn)
-    # specificity = tn / (tn + fp)
-    #
-    # print("test accuracy: ", accuracy)
-    # print("test sensitivity: ", sensitivity)
-    # print("test specificity: ", specificity)
+    accuracy = (tp + tn) / (tp + fp + fn + tn)
+    sensitivity = tp / (tp + fn)
+    specificity = tn / (tn + fp)
+
+    print("test accuracy: ", accuracy)
+    print("test sensitivity: ", sensitivity)
+    print("test specificity: ", specificity)
 
     print(
         "************************************************************************************"
     )
-    for index, row in test.iterrows():
-        print(f"** Text **\n {row['text'][:150]}...")
-        #print(f"** Analysis **\n{prediction_confidence[int(index)][0]*100:.2f}% chance of being AI generated")
-        print(f"** Analysis **\n {"AI Generated" if predicted_labels[int(index)] else "not AI generated"}")
+    index = 0
+    for _, (text, label) in test.iterrows():
+        print(f"** Text **\n {text[:150]}...")
+        print(f"** Analysis **\n {'AI Generated' if predicted_labels[int(index)] else 'not AI generated'}")
+        print(f" {'correct' if predicted_labels[index] == label else 'incorrect'} analysis")
         print(f" chance of being AI generated: {prediction_confidence[int(index)]*100:.2f}%")
 
         print()
+        index += 1
+        if index >= len(predicted_labels):
+            break
