@@ -9,14 +9,17 @@ References are included in milestone 2 report.
 """
 
 import pandas as pd
-import numpy as np
 import kagglehub
 from gensim.models import KeyedVectors
 import tensorflow as tf
 from tensorflow.keras.preprocessing.sequence import pad_sequences
-from tensorflow.keras.layers import Embedding
-from tensorflow.keras import Model
+from tensorflow.keras.models import Model
 from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.backend import tanh, dot, softmax, sum
+from tensorflow.keras.layers import Input, Dense, Bidirectional, LSTM, Embedding, Lambda, Layer
+from keras.saving import register_keras_serializable
+
+
 from sklearn.metrics import confusion_matrix
 import spacy
 
@@ -132,7 +135,7 @@ class SamplingStrategy:
         shortened_data = pd.DataFrame()
 
         # Get an equal amount of random samples from each class and add it to the new dataset df
-        np.random.seed(123)
+        # np.random.seed(123)
         if amount_per_class > 0:
             label_1 = dataset[dataset["label"] == 1].sample(
                 amount_per_class, random_state=42
@@ -198,6 +201,41 @@ class SamplingStrategy:
             train_no_space_data.to_csv(output_csv_path, index=False)
         return train_no_space_data
 
+@register_keras_serializable(package="Custom", name="AttentionLayer")
+class AttentionLayer(Layer):
+    def __init__(self, **kwargs):
+        super(AttentionLayer, self).__init__(**kwargs)
+
+    def build(self, input_shape: tuple[int, int, int]) -> None:
+        # input_shape = (batch_size=2, timesteps=5, hidden_dim=3)
+
+        # weights vector to track what features matter most
+        # in identifying AI generated words
+        self.W = self.add_weight(
+            name='att_weight',
+            shape=(input_shape[-1], 1),  # input_shape[-1] == number of features
+            initializer="glorot_uniform",
+            trainable=True
+        )
+
+        # positional bias: do words at the beginning matter more than
+        # words at the end
+        self.b = self.add_weight(
+            name="att_bias",
+            shape=(input_shape[1], 1),  # input_shape[1] == sentence length
+            initializer="zeros",
+            trainable=True
+        )
+
+        super().build(input_shape)
+
+    def call(self, x):
+        # x := (batch_size=2, timesteps=5, hidden_dim=3)
+        imp = tanh(dot(x, self.W) + self.b)  # importance score of each word
+        imp_norm = softmax(imp, axis=1)  # normalize
+        output = x * imp_norm  # each word scaled by its weight
+        return sum(output, axis=1), output
+
 
 class RNNTextClassifier:
     """
@@ -213,7 +251,7 @@ class RNNTextClassifier:
         self.model = model
         self.embedding_layer = w2v_embedding_layer
 
-    def build(self, input_dimension: int) -> None:
+    def build(self, input_dimension: int, max_len: int, layer_dim: int = 64) -> None:
         """
         Build the model.
         Layers:
@@ -226,31 +264,31 @@ class RNNTextClassifier:
         if isinstance(self.model, Model):
             print("Warning: overwriting pretrained model")
 
-        self.model = tf.keras.Sequential()
-        if self.embedding_layer is None:
-            self.model.add(
-                tf.keras.layers.Embedding(
-                    input_dim=input_dimension, output_dim=64, mask_zero=True
-                )
-            )
-            self.model.add(tf.keras.layers.Bidirectional(tf.keras.layers.LSTM(64)))
-            self.model.add(tf.keras.layers.Dense(64, activation="relu"))
+        inputs = Input(shape=(max_len,), name="input")
 
+        if self.embedding_layer is None:
+            embed_layer = Embedding(
+                input_dim=input_dimension, output_dim=layer_dim, mask_zero=True
+            )
         else:
             embed_layer = self.embedding_layer()
-            self.model.add(embed_layer)
-            self.model.add(
-                tf.keras.layers.Bidirectional(
-                    tf.keras.layers.LSTM(embed_layer.output_dim)
-                )
-            )
-            self.model.add(
-                tf.keras.layers.Dense(embed_layer.output_dim, activation="relu")
-            )
+        embed_layer_out = embed_layer(inputs)
 
-        self.model.add(tf.keras.layers.Dense(1, activation="sigmoid"))
-        self.model.compile(
-            loss="binary_crossentropy", optimizer="adam", metrics=["accuracy"]
+        bi_lstm_out = Bidirectional(LSTM(embed_layer.output_dim, return_sequences=True))(embed_layer_out)
+
+        attn_layer_out, word_weights = AttentionLayer()(bi_lstm_out)
+        # word_weights = Lambda(lambda x: x, name="word_weights")(word_weights)
+
+        relu_layer_out = Dense(embed_layer.output_dim, activation='relu')(attn_layer_out)
+
+        outputs = Dense(1, activation='sigmoid', name='prediction')(relu_layer_out)
+
+        self.model = Model(inputs=inputs, outputs=[outputs, word_weights])
+
+        self.train_model = Model(inputs=inputs, outputs=outputs)
+
+        self.train_model.compile(
+            loss='binary_crossentropy', optimizer="adam", metrics=["accuracy"]
         )
 
     def train(
@@ -261,17 +299,20 @@ class RNNTextClassifier:
         batch_size: int,
     ) -> None:
 
-        # KERAS built in in early stopping, will stop training once loss is the same for two consecutive epochs
+        X = train_text.values if hasattr(train_text, "values") else train_text
+        y = train_label.values if hasattr(train_label, "values") else train_label
+
+        # KERAS built-in early stopping, will stop training once loss is the same for two consecutive epochs
         callbacks = [EarlyStopping(monitor = "loss", patience = 2, restore_best_weights = False)]
 
-        self.model.fit(
-            train_text, train_label, epochs=epoch, batch_size=batch_size, verbose=2, callbacks = callbacks
+        self.train_model.fit(
+            X, y, epochs=epoch, batch_size=batch_size, verbose=2, callbacks = callbacks
         )
 
-    def predict(self, test_text: pd.DataFrame) -> Tuple[list[int], list[float]]:
+    def predict(self, test_text: pd.DataFrame):
 
         test_text = tf.convert_to_tensor(test_text.values)
-        results = self.model(test_text, training=False)
+        results, word_weights = self.model(test_text, training=False)
         # results = self.model.predict(test_text, training=False)
         predicted_labels = []
         predicted_confidence = []
@@ -282,7 +323,7 @@ class RNNTextClassifier:
                 predicted_labels.append(0)
             predicted_confidence.append(float(value))
 
-        return predicted_labels, predicted_confidence
+        return predicted_labels, predicted_confidence, word_weights
 
     def prediction_metrics(
         self, y_predicted: list[int], y_actual: pd.DataFrame
@@ -377,10 +418,12 @@ if __name__ == "__main__":
 
     train = pd.read_csv("data/final_train.csv")
 
-    train_features, train_labels = preprocess(train, samples_per_class=1000)
+    train_features, train_labels = preprocess(train, samples_per_class=15000)
+
+    max_len_sentence = train_features.w2v.max_len_sentence
 
     with open('data.json', 'w') as f:
-        json.dump({"max_len_sentence":train_features.w2v.max_len_sentence},f)
+        json.dump({"max_len_sentence":max_len_sentence},f)
 
     rnn = RNNTextClassifier(w2v_embedding_layer=train_features.w2v.embed_layer)
 
@@ -390,12 +433,13 @@ if __name__ == "__main__":
     # input dimension is number of words we have downloaded
     input_dim = len(train_features.w2v.word_indices)
     print(f"Setting input_dim to {input_dim}")
-    rnn.build(input_dimension=input_dim)
+    rnn.build(input_dimension=input_dim, max_len=max_len_sentence)
 
     # train the model
     print("training...")
-    rnn.train(train_features, train_labels, epoch=5, batch_size=10)
+    rnn.train(train_features, train_labels, epoch=10, batch_size=10)
     print(f"elapsed = {(time.time()-start_time)//60} minutes")
 
     print("saving model...")
-    rnn.model.save("saved_model.keras")
+    # rnn.model.save("temp_model.h5")
+    rnn.model.save("temp_model.keras")
